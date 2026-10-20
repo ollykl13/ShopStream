@@ -1,0 +1,57 @@
+services:
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.10
+    container_name: shopstream-clickhouse
+    hostname: clickhouse
+    ports:
+      - "8123:8123"   # HTTP-интерфейс
+      - "9000:9000"   # Native-протокол
+    environment:
+      CLICKHOUSE_DB: shop
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ../clickhouse/init:/docker-entrypoint-initdb.d
+      - ../clickhouse/config.d/kafka.xml:/etc/clickhouse-server/config.d/kafka.xml
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: shopstream-redpanda
+    hostname: redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094
+      - --advertise-kafka-addr=INTERNAL://redpanda:9092,EXTERNAL://localhost:9092
+    ports:
+      - "9092:9094"   # Kafka API для внешних клиентов (хост -> контейнер)
+      - "9644:9644"   # Admin API
+    volumes:
+      - ../redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  clickhouse-data:
+  redpanda-data:

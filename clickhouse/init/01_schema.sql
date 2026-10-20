@@ -2,7 +2,7 @@
 -- ShopStream: схема ClickHouse, слой RAW
 -- ============================================================
 
--- 1. Таблица постоянного хранения событий
+-- 1. Целевая таблица: постоянное хранение событий
 CREATE TABLE IF NOT EXISTS shop.raw_events
 (
     event_time    DateTime,
@@ -20,7 +20,7 @@ ENGINE = MergeTree()
 PARTITION BY toYYYYMM(event_time)
 ORDER BY (event_time, user_id, product_id);
 
--- 2. Карантин для ошибок парсинга
+-- 2. Карантин для битых сообщений
 CREATE TABLE IF NOT EXISTS shop.kafka_events_errors
 (
     _topic        String,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS shop.kafka_events_errors
 ENGINE = MergeTree()
 ORDER BY _ingested_at;
 
--- 3. Kafka Engine
+-- 3. Kafka Engine: читает сообщения из Redpanda
 CREATE TABLE IF NOT EXISTS shop.kafka_events
 (
     event_time    DateTime,
@@ -50,10 +50,9 @@ ENGINE = Kafka
 SETTINGS
     kafka_broker_list   = 'redpanda:9092',
     kafka_topic_list    = 'shop_events',
-    kafka_group_name    = 'clickhouse_consumer_v2',
+    kafka_group_name    = 'clickhouse_consumer_v8',
     kafka_format        = 'JSONEachRow',
     kafka_num_consumers = 2,
-    kafka_auto_offset_reset = 'earliest',
     kafka_handle_error_mode = 'stream';
 
 -- 4. MV: валидные события -> raw_events
@@ -71,7 +70,7 @@ SELECT
     user_id,
     user_session
 FROM shop.kafka_events
-WHERE length(_error) = 0;
+WHERE coalesce(_error, '') = '';
 
 -- 5. MV: битые события -> карантин
 CREATE MATERIALIZED VIEW IF NOT EXISTS shop.mv_kafka_errors
@@ -84,4 +83,4 @@ SELECT
     _raw_message,
     _error
 FROM shop.kafka_events
-WHERE length(_error) > 0;
+WHERE coalesce(_error, '') != '';
