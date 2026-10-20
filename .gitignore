@@ -1,0 +1,27 @@
+# Data
+data/*
+!data/.gitkeep
+
+# ClickHouse
+clickhouse-data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# dbt
+dbt_shop/target/
+dbt_shop/dbt_packages/
+dbt_shop/logs/
+dbt_shop/profiles.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
