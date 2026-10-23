@@ -1,0 +1,76 @@
+version: 2
+
+models:
+  - name: mart_daily_sales
+    description: "Дневная витрина продаж: GMV, заказы, AOV, конверсия"
+    columns:
+      - name: event_date
+        description: "Дата"
+        tests:
+          - not_null
+          - unique
+      - name: purchases
+        tests:
+          - not_null
+      - name: revenue
+        tests:
+          - not_null
+  - name: mart_realtime_funnel
+    description: "Почасовая воронка view → cart → purchase"
+    columns:
+      - name: event_hour
+        description: "Час"
+        tests:
+          - not_null
+          - unique
+      - name: views
+        tests:
+          - not_null
+  - name: mart_top_products
+    description: "Аналитика по товарам: воронка, выручка, средняя цена"
+    columns:
+      - name: product_id
+        description: "ID товара"
+        tests:
+          - not_null
+          - unique
+      - name: purchases
+        tests:
+          - not_null
+      - name: revenue
+        tests:
+          - not_null
+  - name: mart_rfm_segments
+    description: "RFM-сегментация пользователей, совершивших покупку"
+    columns:
+      - name: user_id
+        description: "ID пользователя"
+        tests:
+          - not_null
+          - unique
+      - name: segment
+        description: "RFM-сегмент: champions / loyal / at_risk / lost / ..."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['champions', 'loyal', 'new', 'cant_lose', 'at_risk', 'lost', 'promising', 'others']
+      - name: monetary
+        tests:
+          - not_null
+  - name: mart_cohorts
+    description: "Когортный анализ: retention по неделям первой покупки"
+    columns:
+      - name: cohort_week
+        description: "Неделя первой покупки когорты"
+        tests:
+          - not_null
+      - name: week_number
+        description: "Номер недели с момента первой покупки (0, 1, 2, ...)"
+        tests:
+          - not_null
+      - name: users
+        tests:
+          - not_null
+      - name: retention_pct
+        tests:
+          - not_null                              
