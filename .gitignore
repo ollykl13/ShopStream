@@ -25,3 +25,14 @@ dbt_shop/profiles.yml
 # OS
 .DS_Store
 Thumbs.db
+
+# Redpanda
+redpanda-data/
+
+# Logs
+*.log
+logs/
+replay.log
+
+# Screenshots (если не хочешь коммитить)
+# *.JPG
