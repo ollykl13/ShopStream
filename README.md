@@ -29,6 +29,7 @@
 
 ## 🏗 Архитектура данных
 
+
 ```mermaid
 graph TD
     A[CSV: 42.4M events] -->|Python Producer| B(Redpanda / Kafka)
@@ -36,6 +37,9 @@ graph TD
     C -->|dbt stg_events| D[(dbt Staging View)]
     D -->|dbt marts| E[(dbt Marts: 5 витрин)]
     E -->|SQL| F[Grafana Dashboards]
+    
+    G[Apache Airflow] -.->|Каждую минуту| C
+    G -.->|Запуск dbt build| E
 ```
 
 **Слои данных в ClickHouse:**
@@ -53,6 +57,7 @@ graph TD
 *   **Визуализация:** Grafana
 *   **Оркестрация:** Docker Compose
 *   **Язык:** Python 3 (kafka-python, Faker)
+*   **Оркестрация:** Apache Airflow
 
 ---
 
@@ -154,6 +159,11 @@ dbt docs generate && dbt docs serve --port 8085  # Генерация докум
 ## 📝 Changelog
 
 Все значимые изменения в проекте документированы в этом файле.
+### [1.4.0] - 2026-11-03
+#### Добавлено
+*   Настроена оркестрация пайплайна через Apache Airflow.
+*   Добавлен DAG `shopstream_realtime_dbt`, который каждую минуту проверяет новые данные в ClickHouse и запускает `dbt build` для обновления витрин.
+*   Исправлен баг с путями монтирования DAG-файлов в Docker на Windows.
 
 ### [1.3.0] - 2026-10-23
 #### Добавлено
