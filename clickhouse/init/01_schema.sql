@@ -84,3 +84,18 @@ SELECT
     _error
 FROM shop.kafka_events
 WHERE coalesce(_error, '') != '';
+
+-- 6. Таблица watermark для Airflow (отслеживание последней обработки)
+CREATE TABLE IF NOT EXISTS shop.dbt_watermark
+(
+    id UInt8,
+    last_ingested_at DateTime,
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY id;
+
+-- 7. Инициализация watermark (idempotent — только если ещё нет строки)
+INSERT INTO shop.dbt_watermark (id, last_ingested_at)
+SELECT 1, toDateTime('1970-01-01 00:00:00')
+WHERE NOT EXISTS (SELECT 1 FROM shop.dbt_watermark WHERE id = 1);
