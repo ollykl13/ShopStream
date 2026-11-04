@@ -1,5 +1,7 @@
 {{ config(
-    materialized='table',
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='event_hour',
     engine='MergeTree',
     order_by='event_hour',
     partition_by='toYYYYMM(event_hour)'
@@ -17,5 +19,8 @@ SELECT
     round(countIf(event_type = 'purchase') * 100.0
           / nullIf(countIf(event_type = 'view'), 0), 2) AS view_to_purchase_pct
 FROM {{ ref('stg_events') }}
+{% if is_incremental() %}
+WHERE event_hour >= toStartOfHour(now() - INTERVAL 2 HOUR)
+{% endif %}
 GROUP BY event_hour
 ORDER BY event_hour

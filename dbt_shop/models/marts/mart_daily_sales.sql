@@ -1,5 +1,7 @@
 {{ config(
-    materialized='table',
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='event_date',
     engine='MergeTree',
     order_by='event_date',
     partition_by='toYYYYMM(event_date)'
@@ -17,5 +19,8 @@ SELECT
     round(countIf(event_type = 'purchase') * 100.0
           / nullIf(countIf(event_type = 'view'), 0), 4) AS conversion_rate_pct
 FROM {{ ref('stg_events') }}
+{% if is_incremental() %}
+WHERE event_date >= (SELECT max(event_date) FROM {{ this }})
+{% endif %}
 GROUP BY event_date
 ORDER BY event_date
