@@ -1,16 +1,19 @@
 # 🛒 ShopStream: Real-time Analytics Platform
 
-**ShopStream** — это end-to-end платформа аналитики интернет-магазина, обрабатывающая поток событий в режиме, близком к реальному времени. Проект демонстрирует современный стек данных: от сбора сырых событий до построения интерактивных BI-дашбордов.
+**ShopStream** — это end-to-end платформа аналитики интернет-магазина, обрабатывающая поток событий в режиме, близком к реальному времени. Проект демонстрирует современный стек данных: от сбора сырых событий до построения интерактивных BI-дашбордов с автоматической оркестрацией через Airflow.
 
 ---
 
 ## 📑 Оглавление
 1. [Описание решения](#-описание-решения)
-2. [Архитектура данных](#-архитектура-данных)
+2. [Архитектура](#-архитектура)
 3. [Технологический стек](#-технологический-стек)
-4. [Ключевые результаты](#-ключевые-результаты)
-5. [Шаги развертывания](#-шаги-развертывания)
-6. [Changelog](#-changelog)
+4. [Детали инфраструктуры](#-детали-инфраструктуры)
+5. [Модели данных](#-модели-данных)
+6. [Ключевые результаты](#-ключевые-результаты)
+7. [Шаги развертывания](#-шаги-развертывания)
+8. [Троблшутинг (Windows)](#-троблшутинг-windows)
+9. [Changelog](#-changelog)
 
 ---
 
@@ -19,184 +22,271 @@
 **Бизнес-проблема:** Классические реляционные СУБД (PostgreSQL, MySQL) не справляются с аналитикой на десятках миллионов строк в реальном времени — запросы агрегации занимают минуты, а дашборды отстают от реальности.
 
 **Наше решение:** Гибридная архитектура (Lambda-like), где:
-1. **Слой скорости (Real-time):** События из Kafka стекаются в ClickHouse через Kafka Engine и Materialized View. Данные доступны для запросов за секунды.
-2. **Слой трансформаций:** Инструмент **dbt** строит очищенные слои (staging) и бизнес-витрины (marts) на основе сырых данных.
-3. **Визуализация:** **Grafana** подключается напрямую к витринам ClickHouse, обеспечивая мгновенную загрузку графиков.
+1. **Слой скорости (Real-time):** события из Kafka стекаются в ClickHouse через Kafka Engine и Materialized View — данные доступны за секунды.
+2. **Слой трансформаций (Batch/Speed):** dbt строит очищенные слои (staging) и бизнес-витрины (marts). Инкрементальные модели обрабатывают только новые данные.
+3. **Оркестрация:** Apache Airflow запускает `dbt build` **только при появлении новых данных** (watermark-паттерн), не тратя ресурсы вхолостую.
+4. **Визуализация:** Grafana подключается напрямую к витринам ClickHouse и обновляется каждые 5 секунд.
 
-**Объём данных:** В рамках проекта обработан открытый датасет **REES46** — 42.4 млн событий e-commerce за октябрь 2019 года.
+**Объём данных:**
+- **Октябрь 2019:** 42.4M событий (загружено полностью, ~4.5 ГБ).
+- **Ноябрь 2019:** поток в реальном времени (~500 событий/сек, на момент написания — 1.9M+ строк).
+
 
 ---
 
-## 🏗 Архитектура данных
+## 🏗 Архитектура
 
+**Поток данных:**
 
-```mermaid
-graph TD
-    A[CSV: 42.4M events] -->|Python Producer| B(Redpanda / Kafka)
-    B -->|Kafka Engine| C[(ClickHouse: raw_events)]
-    C -->|dbt stg_events| D[(dbt Staging View)]
-    D -->|dbt marts| E[(dbt Marts: 5 витрин)]
-    E -->|SQL| F[Grafana Dashboards]
-    
-    G[Apache Airflow] -.->|Каждую минуту| C
-    G -.->|Запуск dbt build| E
-```
+1. **CSV (42.4M events)** → Python Producer (~500 ev/s) → **Redpanda/Kafka** (topic `shop_events`, 3 partitions, 1 replica)
+2. **Redpanda** → Kafka Engine (2 consumers, consumer group `clickhouse_consumer_v8`) → **ClickHouse** `raw_events` (MergeTree, partition by month)
+3. **raw_events** → dbt `stg_events` (View) → dbt marts (5 витрин)
+4. **marts** → **Grafana** (autorefresh 5s, ClickHouse datasource)
+5. **Airflow** каждую минуту проверяет `shop.dbt_watermark` → запускает `dbt build` при новых данных
 
-**Слои данных в ClickHouse:**
-*   `shop.raw_events` — сырые события (движок MergeTree).
-*   `shop_staging.stg_events` — очищенные данные (View).
-*   `shop_marts.*` — 5 материализованных витрин (Table) для BI.
+**Слои данных:**
+- `shop.raw_events` — сырые события (MergeTree)
+- `shop_staging.stg_events` — очищенные события (View)
+- `shop_marts.*` — 5 материализованных витрин
 
 ---
 
 ## 🛠 Технологический стек
 
-*   **Хранилище:** ClickHouse 24.10
-*   **Брокер сообщений:** Redpanda (Kafka-совместимый)
-*   **Трансформации:** dbt-core + dbt-clickhouse
-*   **Визуализация:** Grafana
-*   **Оркестрация:** Docker Compose
-*   **Язык:** Python 3 (kafka-python, Faker)
-*   **Оркестрация:** Apache Airflow
+| Слой | Технология | Роль |
+|---|---|---|
+| Источник | REES46 Dataset (Kaggle) | 42.4M событий (октябрь) + поток (ноябрь) |
+| Продюсер | Python 3 + `kafka-python-ng` | Отправка событий в Kafka |
+| Брокер | **Redpanda v24.2.7** | Kafka-совместимый, буферизация |
+| Хранилище | **ClickHouse 24.10** | OLAP, real-time аналитика |
+| Трансформации | **dbt-core 1.12.6 + dbt-clickhouse 1.10.3** | 6 моделей, 26 тестов |
+| Оркестрация | **Apache Airflow 2.11.2** | Watermark-пайплайн |
+| Визуализация | **Grafana 11.x** + ClickHouse datasource | Live-дашборд 5s |
+| Инфраструктура | Docker Compose + named volumes | 6 контейнеров |
+| Метаданные | PostgreSQL 13 | Backend для Airflow |
+
 
 ---
 
-## 📈 Ключевые результаты и инсайты
+## 🔧 Детали инфраструктуры
 
-*   **Обработано данных:** 42 470 945 событий (3 типа: view, cart, purchase).
-*   **GMV за октябрь 2019:** $230M.
-*   **Топ-бренд:** Apple ($111M, несмотря на меньшее число заказов, чем у Samsung — за счёт высокого среднего чека).
-*   **Воронка продаж:** Конверсия из просмотра в покупку — 1.6–2.1%.
-*   **RFM-сегментация:** Самая ценная группа — `cant_lose` (54% всей выручки, $105M).
-*   **Retention:** На первой неделе возвращается 15.2% пользователей, на четвёртой — 9.35%.
+### Kafka / Redpanda
+
+| Параметр | Значение |
+|---|---|
+| **Топик** | `shop_events` |
+| **Партиций** | **3** |
+| **Реплик** | **1** (single-node) |
+| **Продюсеров** | **1** (Python `replay.py`, ~500 ev/s) |
+| **Консьюмеров ClickHouse** | **2** (`kafka_num_consumers = 2`) |
+| **Consumer Group** | `clickhouse_consumer_v8` |
+| **`auto_offset_reset`** | `earliest` (через `config.d/kafka.xml`) |
+
+> **Почему 3 партиции:** параллелизм чтения (2 консьюмера на 3 партициях).
+
+### ClickHouse
+
+| Параметр | Значение |
+|---|---|
+| **Версия** | 24.10 |
+| **Режим** | **Single-node** (без шардов и реплик) |
+| **Движок** | MergeTree family |
+| **Порты** | 8123 (HTTP), 9000 (Native) |
+| **Named volume** | `clickhouse-data` |
+
+**Про шарды и реплики:**
+- В текущей конфигурации — **single-node**, без шардирования и репликации.
+- Для production: `ReplicatedMergeTree` + ClickHouse Keeper (2–3 реплики), `Distributed` таблицы для шардирования, `ON CLUSTER` DDL.
+- Для учебного проекта single-node достаточно — 42M строк агрегируются за 0.18 сек.
+
+### Airflow
+
+| Параметр | Значение |
+|---|---|
+| **Версия** | 2.11.2 |
+| **Executor** | `LocalExecutor` |
+| **DAG** | `shopstream_realtime_dbt` |
+| **Schedule** | `* * * * *` (каждую минуту) |
+| **Tasks** | 3: `check_for_new_events` → `run_dbt_build` → `update_watermark` |
+| **Watermark** | `shop.dbt_watermark` (ReplacingMergeTree) |
+
+### Grafana
+
+| Параметр | Значение |
+|---|---|
+| **Datasource** | ClickHouse (HTTP, `clickhouse:8123`) |
+| **Autorefresh** | 5 секунд |
+| **Панели** | 8 (4 исторических + 4 live) |
+| **Named volume** | `grafana-data` |
+
+
+---
+
+## 🗄 Модели данных
+
+### ClickHouse (raw layer)
+
+| Таблица | Движок | Назначение | Строк |
+|---|---|---|---|
+| `shop.raw_events` | MergeTree (partition: `toYYYYMM`) | Сырые события | ~44M |
+| `shop.kafka_events` | Kafka Engine | Читает из топика | — |
+| `shop.kafka_events_errors` | MergeTree | Карантин битых сообщений | 0 |
+| `shop.dbt_watermark` | ReplacingMergeTree | Метка последней обработки | 1 |
+| `shop.mv_kafka_to_raw` | Materialized View | Kafka → raw_events | — |
+| `shop.mv_kafka_errors` | Materialized View | Kafka → quarantine | — |
+
+**Партиции `raw_events`:** `201910` (~42.4M), `201911` (~1.7M).
+
+### dbt-модели
+
+| Слой | Модель | Тип | Назначение |
+|---|---|---|---|
+| staging | `stg_events` | View | Очищенные события |
+| marts | `mart_daily_sales` | **Incremental** | GMV, заказы, AOV по дням |
+| marts | `mart_realtime_funnel` | **Incremental** | Воронка по часам |
+| marts | `mart_top_products` | Table | Топ товаров/брендов |
+| marts | `mart_rfm_segments` | Table | RFM-сегментация (347K) |
+| marts | `mart_cohorts` | Table | Когортный retention |
+
+**Data-тесты:** 26. `dbt build` → `PASS=32` (6 моделей + 26 тестов).
+
+**Производительность:**
+- `--full-refresh` (все модели): ~10 сек.
+- `dbt build` (инкремент, без новых): **< 2 сек**.
+- `--select mart_daily_sales mart_realtime_funnel`: **0.79 сек**.
+
+---
+
+## 📈 Ключевые результаты
+
+### Данные
+- **Обработано:** 42 470 945 событий (октябрь) + ~1.9M ноябрьских.
+- **Уникальных пользователей:** 3 022 290.
+- **Уникальных товаров:** 166 794.
+
+### Бизнес-инсайты
+- **GMV за октябрь:** $230M.
+- **Топ-бренд:** Apple ($111M) — за счёт высокого среднего чека.
+- **RFM `cant_lose`:** 54% выручки ($105M).
+- **Retention:** 15.2% (1-я неделя), 9.35% (4-я).
+- **Конверсия view → purchase:** 1.6–2.1%.
+
+### Производительность
+- **Запрос 31 день × агрегация:** **0.176 сек** на 42M строк.
+- **Сжатие:** 3.81 ГБ → 1.82 ГБ (**2.1x**).
+
 
 ---
 
 ## 🚀 Шаги развертывания
 
-### Предварительные требования
-*   Docker Desktop (с WSL2 для Windows)
-*   Python 3.10+ (в проекте использовался 3.14)
-*   Git Bash или Linux-терминал
+### 1. Клонирование и установка
 
-### 1. Клонирование репозитория и установка зависимостей
-```bash
-git clone <твой_url_репозитория>
-cd shopstream
+    git clone <url>
+    cd shopstream
+    python -m venv .venv
+    source .venv/Scripts/activate
+    pip install -r requirements.txt
 
-# Создаём виртуальное окружение и ставим зависимости
-python -m venv .venv
-source .venv/Scripts/activate  # Для Windows (Git Bash)
-# source .venv/bin/activate    # Для Linux/macOS
+### 2. Запуск инфраструктуры
 
-pip install -r requirements.txt
-```
+    docker compose -f infra/docker-compose.yml up -d
 
-### 2. Запуск инфраструктуры (Docker)
-Проект использует **именованные тома** (named volumes) вместо bind-mount, чтобы избежать проблем с правами доступа на Windows.
-
-```bash
-docker compose -f infra/docker-compose.yml up -d
-```
-*Проверка:* `docker compose -f infra/docker-compose.yml ps` — все контейнеры (clickhouse, redpanda, grafana) должны быть `Up (healthy)`.
+Проверка: 6 контейнеров `Up`.
 
 ### 3. Инициализация ClickHouse
-Создаём базу данных, таблицу `raw_events`, Kafka Engine и Materialized View.
 
-```bash
-docker compose -f infra/docker-compose.yml exec -T clickhouse \
-    clickhouse-client --multiquery < clickhouse/init/01_schema.sql
-```
+    MSYS_NO_PATHCONV=1 docker compose -f infra/docker-compose.yml exec -T clickhouse \
+        clickhouse-client --multiquery < clickhouse/init/01_schema.sql
 
-### 4. Загрузка данных (Replay)
-Запускаем Python-скрипт, который читает CSV и отправляет события в Kafka. 
-*(Файл `2019-Oct.csv` нужно предварительно скачать с Kaggle и положить в `data/rees46/`)*.
+### 4. Данные
 
-```bash
-# Тестовый прогон на 1000 строк
-python producer/replay.py --file data/rees46/2019-Oct.csv --limit 1000
+Скачать `2019-Oct.csv` и `2019-Nov.csv` с [Kaggle REES46](https://www.kaggle.com/datasets/mkechinov/ecommerce-behavior-data-from-multi-category-store) в `data/rees46/`.
 
-# Полный прогон (42.4M строк)
-python producer/replay.py --file data/rees46/2019-Oct.csv --rate 5000
-```
+### 5. Запуск потока
 
-### 5. Настройка и запуск dbt
-Для работы dbt требуется профиль подключения. Создайте файл `~/.dbt/profiles.yml`:
+Первый запуск:
 
-```yaml
-dbt_shop:
-  target: dev
-  outputs:
-    dev:
-      type: clickhouse
-      schema: shop
-      host: localhost
-      port: 8123
-      user: default
-      password: ''
-      secure: false
-      threads: 4
-```
+    python producer/replay.py --file data/rees46/2019-Oct.csv --rate 500 --skip-errors
 
-Запуск моделей и тестов:
+Возобновление после остановки:
 
-```bash
-cd dbt_shop
-dbt debug   # Проверка подключения
-dbt build   # Запуск моделей и тестов (PASS=32)
-dbt docs generate && dbt docs serve --port 8085  # Генерация документации
-```
+    python producer/replay.py --file data/rees46/2019-Nov.csv --resume --rate 500 --skip-errors
 
-### 6. Настройка Grafana
-1. Открой `http://localhost:3000` (admin/admin).
-2. Перейди в **Connections -> Data sources -> Add data source -> ClickHouse**.
-3. Настройки: `Server address: clickhouse`, `Port: 8123`, `Protocol: HTTP`, `User: default`.
-4. Нажми **Save & test** (должно появиться "Data source is working").
-5. Импортируй дашборд из `grafana/dashboards/shopstream_overview.json` (Dashboards -> New -> Import).
+### 6. dbt
+
+    cd dbt_shop
+    dbt debug
+    dbt build
+    dbt docs serve --port 8085
+
+### 7. Airflow
+
+1. Открыть `http://localhost:8080` (admin/admin).
+2. **Admin → Connections:** `clickhouse_shop` (Host: `clickhouse`, Port: `8123`, Type: `Generic`).
+3. Включить DAG `shopstream_realtime_dbt`.
+
+### 8. Grafana
+
+1. Открыть `http://localhost:3000` (admin/admin).
+2. Datasource: `ClickHouse-Shop` (Host: `clickhouse`, Port: `8123`).
+3. Импорт: `grafana/dashboards/shopstream_overview.json`.
+
+---
+
+## 🩹 Троблшутинг (Windows)
+
+| Проблема | Причина | Решение |
+|---|---|---|
+| `Permission denied` при вставке | Bind-mount на NTFS | Named volume `clickhouse-data` |
+| DAG не виден в Airflow | Относительный путь `./` от `infra/` | Заменить на `../airflow/dags` |
+| `NoBrokersAvailable` | `localhost` в контейнере | `redpanda:9092` |
+| `dbt: Path does not exist` | Airflow не видит профиль | `--profiles-dir /opt/airflow/dbt_shop` |
+| `Connection refused` для `clickhouse` | dbt с хоста ≠ dbt в контейнере | 2 outputs в `profiles.yml` |
+| `BrokenPipeError` в scheduler | `LocalExecutor` на Windows | `SequentialExecutor` |
+
 
 ---
 
 ## 📝 Changelog
 
-Все значимые изменения в проекте документированы в этом файле.
-
-### [1.5.0] - 2026-11-04
+### [1.5.0] - 2026-11-05
 #### Добавлено
-*   Настроена непрерывная загрузка данных (поток ~500 событий/сек) из ноябрьского файла.
-*   Переведены витрины `mart_daily_sales` и `mart_realtime_funnel` в инкрементальный режим (время сборки < 2 сек).
-*   В Airflow внедрен паттерн **Watermark**: DAG запускает `dbt build` только при появлении новых данных.
-*   В Grafana добавлены real-time панели (`Live Ingestion`, `Last Data Ingested`) с автообновлением каждые 5 секунд.
+- Непрерывная загрузка ноябрьского файла (~500 ev/s).
+- Инкрементальные модели `mart_daily_sales` и `mart_realtime_funnel`.
+- Watermark-паттерн в Airflow.
+- Resume для продюсера (`--skip`, `--offset`, `--resume`).
+- Live-панели Grafana.
+- Named volume `grafana-data`.
 
 ### [1.4.0] - 2026-11-03
 #### Добавлено
-*   Настроена оркестрация пайплайна через Apache Airflow.
-*   Добавлен DAG `shopstream_realtime_dbt`, который каждую минуту проверяет новые данные в ClickHouse и запускает `dbt build` для обновления витрин.
-*   Исправлен баг с путями монтирования DAG-файлов в Docker на Windows.
+- Apache Airflow 2.11.2 с DAG `shopstream_realtime_dbt`.
+- Таблица `shop.dbt_watermark`.
+- Автозапуск `dbt build` при новых данных.
 
 ### [1.3.0] - 2026-10-23
 #### Добавлено
-*   Настроен datasource ClickHouse в Grafana.
-*   Создан интерактивный дашборд `ShopStream Overview`.
-*   Экспортирован JSON-дашборд в репозиторий.
-*   Написана подробная документация.
+- Grafana datasource + дашборд `ShopStream Overview`.
 
 ### [1.2.0] - 2026-10-23
 #### Добавлено
-*   Создан dbt-проект (адаптер `dbt-clickhouse`).
-*   Разработаны 5 аналитических витрин (marts).
-*   Написаны 26 data-тестов.
+- dbt-проект: 6 моделей, 26 тестов, `PASS=32`.
+- 5 витрин + dbt docs.
 
-### [1.1.0] - 2026-10-23
+### [1.1.0] - 2026-10-22
 #### Добавлено
-*   Загружен полный датасет REES46 (42.4M строк).
-*   Написан Python-продюсер с поддержкой ограничения скорости.
+- Загрузка 42.4M строк в ClickHouse.
+- Python-продюсер `replay.py`.
 
 ### [1.0.1] - 2026-10-22
 #### Исправлено
-*   Ошибка `Permission denied` из-за bind-mount на Windows (переход на Docker Volumes).
-*   Materialized View теряли связь с Kafka Engine.
+- `Permission denied` (bind-mount → volumes).
+- MV теряли связь с Kafka Engine.
+- Формат данных (`UTC`, пустые поля).
 
 ### [1.0.0] - 2026-10-22
 #### Добавлено
-*   Настройка инфраструктуры (ClickHouse, Redpanda, Grafana).
-*   Проверен сквозной пайплайн на тестовых событиях.
+- Docker Compose: ClickHouse, Redpanda, Grafana.
+- Схема БД: `raw_events`, `kafka_events`, `mv_kafka_to_raw`.
+- Сквозной пайплайн на 10 событиях.
